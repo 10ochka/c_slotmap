@@ -1,163 +1,370 @@
+/*
+    This is a sigle-header library implementing type-generic
+    slotmap data structute.
 
-#ifndef SLOTMAP_H
-#define SLOTMAP_H
+
+
+TABLE OF CONTENTS
+
+    - Options
+    - Documentation
+
+
+
+OPTIONS
+
+    #define VNL_SLOTMAP_IMPLEMENTATION
+
+        Set this flag to include implementation for internal functions
+
+    #define VNL_SLOTMAP_UNSAFE_KEYS
+
+        This flag removes key validations like index bounds check and key version check.
+        It also affects definition for the slots and keys, since key/slot version is not needed.
+
+    #define VNL_SLOTMAP_PANIC(file, line, exc, fmt, ...) better_panic
+
+        Redefine to provide alternative panic action. Default version prints source location,
+        exception message and exits via abort()
+
+    #define VNL_SLOTMAP_REALLOC(ptr, size) better_realloc
+    #define VNL_SLOTMAP_FREE(ptr, size) better_free
+
+        By default slotmap uses stdlib realloc/free. If you want to redefine one of these,
+        you must redefine the other macro too.
+
+    #define VNL_SLOTMAP_STRIP_PREFIX
+
+        This flag removes `vnl_` prefix from funciton
+
+
+
+DOCUMENTATION
+    Slotmap functions (actually macros):
+
+    slotmap_t(T)
+        Define a slotmap structure with elemtns of type T.
+
+    slotmap_free(sm)
+        void slotmap_free(slotmap_t *sm);
+            Free the memory held by the slotmap structure. After that,
+            slotmap can be used again.
+
+    slotmap_insert(sm, value)
+        slotmap_key_t slotmap_insert(slotmap_t *sm, T value);
+            Insert value into the slotmap. Returns the key
+            to be able to access this element.
+
+    slotmap_remove(sm, key)
+        T slotmap_remove(slotmap_t *sm, slotmap_key_t key);
+            Remove and return value under the key.
+
+    slotmap_get(sm, key)
+        T slotmap_get(slotmap_t *sm, slotmap_key_t key);
+            Get value associated with the key.
+
+    slotmap_contains(sm, key)
+        bool slotmap_contains(slotmap_t *sm, slotmap_key_t key);
+            Check if key is present in the slotmap. Note that with
+            VNL_SLOTMAP_UNSAFE_KEYS option defined this function
+            will return true if the slot is accupied, regardless of
+            the value stored in.
+
+    slotmap_reserve(sm, nitems)
+        void slotmap_reserve(slotmap_t *sm, size_t nitems);
+            Reserve space for the nitems additional values in the slotmap.
+
+
+*/
+
+
+#ifndef VNL_SLOTMAP_H
+#define VNL_SLOTMAP_H
+
 
 
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+#include <stdbool.h>
+
+
+typedef uint32_t vnl_slotmap_index_t;
+
+#ifdef VNL_SLOTMAP_UNSAFE_KEYS
+
+typedef struct { vnl_slotmap_index_t index; } vnl_slotmap_key_t;
+typedef struct { vnl_slotmap_index_t index; } vnl_slotmap_slot_t;
+
+#else // !VNL_SLOTMAP_UNSAFE_KEYS
+
+typedef struct { vnl_slotmap_index_t index; uint32_t version; } vnl_slotmap_key_t;
+typedef struct { vnl_slotmap_index_t index; uint32_t version; } vnl_slotmap_slot_t;
+
+#endif // VNL_SLOTMAP_UNSAFE_KEYS
 
 
 
-#ifndef slotmap_panic
-#   include <stdio.h>
-#   define slotmap_panic(exc, fmt, ...) (fprintf(stderr, "\033[31m%s:\033[0m " fmt, exc __VA_OPT__(,) __VA_ARGS__), abort())
-#endif // slotmap_panic
+#ifndef VNL_SLOTMAP_PANIC
 
-#ifndef slotmap_realloc
-#   include <stdlib.h>
-#   define slotmap_realloc(ptr, itemsize, nitems) realloc((ptr), itemsize * (nitems))
-#endif // slotmap_realloc
+#include <stdio.h>
+#define VNL_SLOTMAP_PANIC(file, line, exc, fmt, ...)                        \
+    do {                                                                    \
+        fprintf(stderr, "%s:%d: %s: " fmt, file, line, exc, __VA_ARGS__);   \
+        abort();                                                            \
+    } while(0)
 
-#ifndef slotmap_free
-#   include <stdlib.h>
-#   define slotmap_free(ptr) free((ptr))
-#endif // slotmap_free
-
-#ifndef SLOTMAP_INITIAL_CAPACITY
-#   define SLOTMAP_INITIAL_CAPACITY 8
-#endif // SLOTMAP_INITIAL_CAPACITY
+#endif // VNL_SLOTMAP_PANIC
 
 
 
-typedef uint32_t slotmap_index_t;
+#if !defined(VNL_SLOTMAP_REALLOC) && !defined (VNL_SLOTMAP_FREE)
 
-typedef struct {
-    uint32_t index;
-    uint32_t version;
-} slotmap_key_t;
+#include <stdlib.h>
+#define VNL_SLOTMAP_REALLOC(ptr, size) realloc((ptr), (size))
+#define VNL_SLOTMAP_FREE(ptr, size) (free((ptr)), (void)(size))
 
-typedef struct {
-    uint32_t index;
-    uint32_t version;
-} slotmap_slot_t;
+#elif !defined(VNL_SLOTMAP_REALLOC) || !defined (VNL_SLOTMAP_FREE)
 
-#define slotmap_t(T) struct { \
-    slotmap_slot_t *slots;  \
-    uint32_t length;        \
-    uint32_t capacity;      \
-    T *items;              \
-}
+#error "Partial redefinition of VNL_SLOTMAP_REALLOC / VNL_SLOTMAP_FREE is not supported."
+
+#endif
 
 
 
-static inline slotmap_index_t slotmap_impl_follow(void *any_sm, slotmap_index_t idx) {
-    slotmap_t(void) *sm = any_sm;
-    return sm->slots[idx].index;
-}
-
-static inline slotmap_index_t slotmap_impl_get_true_idx(void *any_sm, slotmap_index_t expected_idx) {
-    slotmap_index_t slot_idx = slotmap_impl_follow(any_sm, expected_idx);
-    slotmap_index_t item_idx = slotmap_impl_follow(any_sm, slot_idx);
-    return item_idx;
-}
-
-static inline slotmap_key_t slotmap_impl_create_key(void *any_sm, slotmap_index_t expected_inserted_idx) {
-    slotmap_t(void) *sm = any_sm;
-    slotmap_index_t slot_idx = slotmap_impl_follow(sm, expected_inserted_idx);
-    uint32_t version = ++(sm)->slots[slot_idx].version;
-    return (slotmap_key_t){ slot_idx, version};
-}
-
-static inline void slotmap_impl_grow_if_nessesary(void *any_sm, size_t itemsize) {
-    slotmap_t(void) *sm = any_sm;
-
-    if (sm->capacity > sm->length) return;
-
-    sm->capacity = sm->capacity
-        ? (sm)->capacity * 2
-        : SLOTMAP_INITIAL_CAPACITY;
-
-    (sm)->slots = slotmap_realloc((sm)->slots, sizeof(slotmap_slot_t), (sm)->capacity);
-    (sm)->items = slotmap_realloc((sm)->items, itemsize, (sm)->capacity);
-
-    for (uint32_t i = sm->length; i < sm->capacity; ++i) {
-        sm->slots[i] = (slotmap_slot_t){ i, 0 };
+#define vnl_slotmap_t(T)            \
+    struct {                        \
+        vnl_slotmap_slot_t *slots;  \
+        uint32_t length;            \
+        uint32_t capacity;          \
+        T *items;                   \
     }
+
+
+#define vnl_slotmap_impl_itemsize(sm) sizeof((sm)->items[0])
+
+#define vnl_slotmap_free(sm) \
+    vnl_slotmap_impl_free((sm), vnl_slotmap_impl_itemsize((sm)))
+
+#define vnl_slotmap_insert(sm, value) \
+    (                                                                           \
+        vnl_slotmap_impl_maybegrow((sm), vnl_slotmap_impl_itemsize((sm)), 1),   \
+        (sm)->items[vnl_slotmap_impl_get_insert_index((sm))] = (value),         \
+        (sm)->length++,                                                         \
+        vnl_slotmap_impl_get_insert_key((sm))                                   \
+    )
+
+#define vnl_slotmap_remove(sm, key) \
+    (                                                                   \
+        vnl_slotmap_impl_check_key((sm), (key), __FILE__, __LINE__),    \
+        vnl_slotmap_impl_remove(                                        \
+            (sm),                                                       \
+            (key),                                                      \
+            vnl_slotmap_impl_itemsize((sm))                             \
+        ),                                                              \
+        (sm)->items[(sm)->length]                                       \
+    )
+
+#define vnl_slotmap_get(sm, key) \
+    (                                                                   \
+        vnl_slotmap_impl_check_key((sm), (key), __FILE__, __LINE__),    \
+        (sm)->items[vnl_slotmap_impl_follow_index((sm), (key).index)]   \
+    )
+
+#define vnl_slotmap_contains(sm, key) \
+    vnl_slotmap_impl_contains_key((sm), (key))
+
+#define vnl_slotmap_reserve(sm, nitems) \
+    vnl_slotmap_impl_maybegrow((sm), vnl_slotmap_impl_itemsize((sm)), (nitems))
+
+
+
+inline void vnl_slotmap_impl_free(void *sm, size_t itemsize);
+inline void vnl_slotmap_impl_maybegrow(void *sm, size_t itemsize, size_t nitems);
+inline vnl_slotmap_index_t vnl_slotmap_impl_follow_index(void *sm, vnl_slotmap_index_t index);
+inline vnl_slotmap_index_t vnl_slotmap_impl_get_insert_index(void *sm);
+inline vnl_slotmap_key_t vnl_slotmap_impl_get_insert_key(void *sm);
+inline void vnl_slotmap_impl_check_key(void *sm, vnl_slotmap_key_t key, const char *file, int line);
+inline bool vnl_slotmap_impl_contains_key(void *sm, vnl_slotmap_key_t key);
+inline void vnl_slotmap_impl_remove(void *sm, vnl_slotmap_key_t key, size_t itemsize);
+
+
+
+
+#ifdef VNL_SLOTMAP_STRIP_PREFIX
+
+typedef vnl_slotmap_index_t slotmap_index_t;
+typedef vnl_slotmap_key_t slotmap_key_t;
+typedef vnl_slotmap_slot_t slotmap_slot_t;
+
+#define slotmap_t(T)                vnl_slotmap_t(T)
+#define slotmap_free(sm)            vnl_slotmap_free((sm))
+#define slotmap_insert(sm, value)   vnl_slotmap_insert((sm), (value))
+#define slotmap_remove(sm, key)     vnl_slotmap_remove((sm), (key))
+#define slotmap_get(sm, key)        vnl_slotmap_get((sm), (key))
+#define slotmap_contains(sm, key)   vnl_slotmap_contains((sm), (key))
+#define slotmap_reserve(sm, nitems) vnl_slotmap_reserve((sm), (nitems))
+
+#endif // VNL_SLOTMAP_STRIP_PREFIX
+
+
+#endif // VNL_SLOTMAP_H
+
+
+
+#ifdef VNL_SLOTMAP_IMPLEMENTATION
+
+void vnl_slotmap_impl_free(void *any_sm, size_t itemsize) {
+    vnl_slotmap_t(void) *sm = any_sm;
+    size_t slotsize = sizeof(sm->slots[0]);
+    VNL_SLOTMAP_FREE(sm->slots, sm->capacity * slotsize);
+    VNL_SLOTMAP_FREE(sm->items, sm->capacity * itemsize);
+    sm->length = sm->length = 0;
+    sm->items = sm->slots = NULL;
 }
 
-static inline void slotmap_impl_clear(void *any_sm) {
-    slotmap_t(void) *sm = any_sm;
-    slotmap_free(sm->slots);
-    slotmap_free(sm->items);
-    sm->slots = sm->items = NULL;
-    sm->length = sm->capacity = 0;
+void vnl_slotmap_impl_maybegrow(void *any_sm, size_t itemsize, size_t nitems) {
+    vnl_slotmap_t(void) *sm = any_sm;
+
+    const size_t CAP_ALIGN = 8;
+
+    size_t min_cap = sm->length + nitems;
+    if (min_cap < 8) {
+        min_cap = 8;
+    }
+
+    if (min_cap <= sm->capacity) return;
+
+    if (min_cap <= sm->capacity * 2) {
+        sm->capacity = sm->capacity * 2;
+    } else {
+        // align to multiple of CAP_ALIGN
+        sm->capacity = (min_cap + (CAP_ALIGN - 1)) & ~(CAP_ALIGN - 1);
+    }
+
+    sm->slots = VNL_SLOTMAP_REALLOC(sm->slots, sm->capacity * itemsize);
+    sm->items = VNL_SLOTMAP_REALLOC(sm->items, sm->capacity * itemsize);
+    // Fill new slots
+    for (vnl_slotmap_index_t i = sm->length; i < sm->capacity; ++i) {
+        sm->slots[i] = (vnl_slotmap_slot_t){ .index = i };
+    }
+
 }
 
-static inline void slotmap_impl_check_key(void *any_sm, slotmap_key_t key) {
-    slotmap_t(void) *sm = any_sm;
 
-    if (key.index >= sm->capacity) {
-        slotmap_panic("Slotmap.ImpossibleKey",
-            "Key index out of bounds. Key: (idx: %u, ver: %u), capacity: %u",
+vnl_slotmap_index_t vnl_slotmap_impl_follow_index(void *any_sm, vnl_slotmap_index_t index) {
+    vnl_slotmap_t(void) *sm = any_sm;
+    return sm->slots[index].index;
+}
+
+vnl_slotmap_index_t vnl_slotmap_impl_get_insert_index(void *any_sm) {
+    vnl_slotmap_t(void) *sm = any_sm;
+    vnl_slotmap_index_t insert_item_index = sm->length;
+    vnl_slotmap_index_t insert_slot_index = vnl_slotmap_impl_follow_index(sm, insert_item_index);
+                        insert_item_index = vnl_slotmap_impl_follow_index(sm, insert_slot_index);
+    return insert_item_index;
+}
+
+vnl_slotmap_key_t vnl_slotmap_impl_get_insert_key(void *any_sm) {
+    vnl_slotmap_t(void) *sm = any_sm;
+    vnl_slotmap_index_t insert_item_index = sm->length - 1;
+    vnl_slotmap_index_t insert_slot_index = vnl_slotmap_impl_follow_index(sm, insert_item_index);
+
+#ifndef VNL_SLOTMAP_UNSAFE_KEYS
+
+    vnl_slotmap_key_t key = {
+        insert_slot_index,
+        ++sm->slots[insert_slot_index].version
+    };
+
+#else
+
+    vnl_slotmap_key_t key = {
+        insert_slot_index
+    };
+
+#endif
+
+    return key;
+}
+
+void vnl_slotmap_impl_check_key(void *any_sm, vnl_slotmap_key_t key, const char *file, int line) {
+#ifndef VNL_SLOTMAP_UNSAFE_KEYS
+
+    vnl_slotmap_t(void) *sm = any_sm;
+
+    if (key.index >= sm->capacity)
+        VNL_SLOTMAP_PANIC(file, line, "Slotmap.KeyOutOfBounds",
+            "Key index cannot exceed slotmap capacity: key=(%u, %u), capacity=%u\n",
             key.index, key.version,
             sm->capacity
         );
-    }
 
-    slotmap_index_t item_idx = slotmap_impl_follow(sm, key.index);
+    vnl_slotmap_slot_t slot = sm->slots[key.index];
 
-    uint32_t version = sm->slots[item_idx].version;
-
-    if (version != key.version) {
-        slotmap_panic("Slotmap.ExpiredKey",
-              "Cannot delete key (idx: %u, ver: %u), expected version: %u\n",
-              (key).index, (key).version,
-              version
+    if (slot.version > key.version)
+        VNL_SLOTMAP_PANIC(file, line, "Slotmap.ExpiredKey",
+            "Key is expired: key=(%u, %u), slot=(%u, %u)\n",
+            key.index, key.version,
+            key.index, slot.version
         );
-    }
+
+    if (slot.version < key.version)
+        VNL_SLOTMAP_PANIC(file, line, "Slotmap.YoungKey",
+            "Key is too young: key=(%u, %u), slot=(%u, %u)\n",
+            key.index, key.version,
+            key.index, slot.version
+        );
+
+#else
+
+    (void)any_sm;
+    (void)key;
+    (void)file;
+    (void)line;
+
+#endif // VNL_SLOTMAP_UNSAFE_KEYS
 }
 
-static inline slotmap_index_t slotmap_impl_remove(void *any_sm, size_t itemsize, slotmap_key_t key) {
-    slotmap_t(char) *sm = any_sm;
-    slotmap_impl_check_key((sm), (key));
 
-    slotmap_index_t item_idx = slotmap_impl_follow(sm, key.index);
+bool vnl_slotmap_impl_contains_key(void *any_sm, vnl_slotmap_key_t key) {
+    vnl_slotmap_t(void) *sm = any_sm;
+
+#ifdef VNL_SLOTMAP_UNSAFE_KEYS
+
+    return key.index < sm->capacity
+        && vnl_slotmap_impl_follow_index(sm, key.index) < sm->length;
+
+#else // VNL_SLOTMAP_UNSAFE_KEYS
+
+    return key.index < sm->capacity
+        && sm->slots[key.index].version == key.version
+        && vnl_slotmap_impl_follow_index(sm, key.index) < sm->length;
+
+#endif // VNL_SLOTMAP_UNSAFE_KEYS
+}
+
+void vnl_slotmap_impl_remove(void *any_sm, vnl_slotmap_key_t key, size_t itemsize) {
+    vnl_slotmap_t(char) *sm = any_sm;
+
+    vnl_slotmap_index_t item_idx = vnl_slotmap_impl_follow_index(sm, key.index);
     sm->length--;
 
     void *rem = &sm->items[item_idx * itemsize];
     void *end = &sm->items[sm->length * itemsize];
     void *tmp = alloca(itemsize);
-    memmove(tmp, rem, itemsize);
-    memmove(rem, end, itemsize);
+    memmove(tmp, end, itemsize);
     memmove(end, rem, itemsize);
+    memmove(rem, tmp, itemsize);
 
-    slotmap_slot_t tmpslot = sm->slots[item_idx];
+    vnl_slotmap_slot_t tmpslot = sm->slots[item_idx];
     sm->slots[item_idx].index = sm->length;
-    sm->slots[item_idx].version++;
-    sm->slots[sm->length] = tmpslot;
 
-    return sm->length;
+#ifndef VNL_SLOTMAP_UNSAFE_KEYS
+    sm->slots[item_idx].version++;
+#endif // VNL_SLOTMAP_UNSAFE_KEYS
+
+    sm->slots[sm->length] = tmpslot;
 }
 
-
-
-#define slotmap_insert(sm, value) (                                         \
-    slotmap_impl_grow_if_nessesary((sm), sizeof((sm)->items[0])),           \
-    (sm)->items[slotmap_impl_get_true_idx((sm), (sm)->length)] = (value),   \
-    slotmap_impl_create_key((sm), (sm)->length++)                           \
-)
-
-#define slotmap_remove(sm, key) (sm)->items[slotmap_impl_remove((sm), sizeof((sm)->items[0]), key)]
-
-#define slotmap_at(sm, key) (                           \
-    slotmap_impl_check_key((sm), (key)),                \
-    (sm)->items[slotmap_impl_follow((sm), (key).index)] \
-)
-
-#define slotmap_clear(sm) slotmap_impl_clear((sm))
-
-
-
-
-#endif // SLOTMAP_H
+#endif // VNL_SLOTMAP_IMPLEMENTATION
